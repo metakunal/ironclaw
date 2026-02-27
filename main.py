@@ -1,82 +1,111 @@
 import json
 import os
+from dotenv import load_dotenv
+import google.genai as genai
+import requests
 
-# --- 1. THE TOOLS (The "Hands") ---
+load_dotenv()
+
+# --- INITIALIZATION ---
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").lower()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+def validate_config():
+    if LLM_PROVIDER == "gemini":
+        if not GEMINI_API_KEY or "your-api-key" in GEMINI_API_KEY:
+            print("❌ Error: Valid GEMINI_API_KEY not found in .env")
+            exit(1)
+        return genai.Client(api_key=GEMINI_API_KEY)
+    elif LLM_PROVIDER == "groq":
+        if not GROQ_API_KEY or "your-groq-key" in GROQ_API_KEY:
+            print("❌ Error: Valid GROQ_API_KEY not found in .env")
+            exit(1)
+        return None
+    else:
+        print(f"❌ Error: Unsupported provider '{LLM_PROVIDER}'")
+        exit(1)
+
+client = validate_config()
+
+# --- TOOLS ---
 def save_to_memory(key, value):
-    """Saves a piece of information to the agent's long-term memory."""
+    """Saves a piece of information to memory."""
     memory = {}
     if os.path.exists("memory.json"):
         with open("memory.json", "r") as f:
             memory = json.load(f)
-    
     memory[key] = value
     with open("memory.json", "w") as f:
         json.dump(memory, f, indent=4)
-    return f"Successfully remembered that {key} is {value}."
+    return f"Saved: {key} = {value}"
 
 def get_from_memory(key):
     """Retrieves a piece of information from memory."""
     if os.path.exists("memory.json"):
         with open("memory.json", "r") as f:
-            memory = json.load(f)
-            return memory.get(key, "I don't remember that yet.")
-    return "Memory file is empty."
+            return json.load(f).get(key, "Not found.")
+    return "Memory empty."
 
-# The Tool Registry (The Dispatcher Map)
-tools_map = {
-    "save_to_memory": save_to_memory,
-    "get_from_memory": get_from_memory
-}
+TOOLS = {"save_to_memory": save_to_memory, "get_from_memory": get_from_memory}
 
-# --- 2. THE EXECUTOR (The "Bridge") ---
-def executor(tool_call):
-    name = tool_call["name"]
-    args = tool_call["arguments"] # This is a dictionary
+def handle_tool_call(response):
+    """Parses and executes tool calls found in the response string."""
+    try:
+        if "{" in response and "}" in response:
+            data = json.loads(response[response.find("{"):response.rfind("}")+1])
+            tool_name = data.get("tool")
+            if tool_name in TOOLS:
+                args = {k: v for k, v in data.items() if k != "tool"}
+                print(f"⚙️  Executing {tool_name}...")
+                return TOOLS[tool_name](**args)
+    except Exception:
+        pass
+    return None
+
+# --- MODEL INTERFACE ---
+def call_model(user_message):
+    system_prompt = """You are IronClaw. Available tools:
+1. save_to_memory(key, value)
+2. get_from_memory(key)
+Format tool calls as JSON: {"tool": "save_to_memory", "key": "...", "value": "..."}"""
+
+    prompt = f"{system_prompt}\n\nUser: {user_message}"
+
+    if LLM_PROVIDER == "gemini":
+        resp = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
+        return getattr(resp, "text", str(resp))
     
-    print(f"⚙️  System: Executing tool '{name}'...")
-    
-    func = tools_map.get(name)
-    if func:
-        # Using the ** unpacking we discussed!
-        return func(**args)
-    return "Error: Tool not found."
+    # Groq provider
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [{"role": "user", "content": prompt}]
+    }
+    resp = requests.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+        json=payload
+    )
+    data = resp.json()
+    return data["choices"][0]["message"]["content"] if "choices" in data else json.dumps(data)
 
-# --- 3. THE GATEWAY (The "Interface") ---
+# --- INTERFACE ---
 def run_agent():
-    print("🤖 Mini-OpenClaw Online. Type 'exit' to stop.")
-    
-    # In a real app, you'd initialize your LLM client here
-    # client = OpenAI(api_key="your-key")
-
+    print(f"🤖 IronClaw Online ({LLM_PROVIDER}). Type 'exit' to stop.\n")
     while True:
-        user_input = input("\nYou: ")
-        if user_input.lower() in ["exit", "quit"]:
-            break
+        text = input("You: ").strip()
+        if text.lower() in ["exit", "quit"]: break
+        if not text: continue
 
-        # SIMULATED LLM LOGIC: 
-        # In a real script, you'd send 'user_input' to the LLM.
-        # If the LLM decides to use a tool, it returns a JSON object.
-        
-        # Example: If user says "Remember my name is Alex"
-        if "remember" in user_input.lower():
-            # Simulated Tool Call from LLM
-            mock_tool_call = {
-                "name": "save_to_memory",
-                "arguments": {"key": "user_name", "value": user_input.split("is ")[-1]}
-            }
-            result = executor(mock_tool_call)
-            print(f"Agent: {result}")
-        
-        elif "who am i" in user_input.lower():
-            mock_tool_call = {
-                "name": "get_from_memory",
-                "arguments": {"key": "user_name"}
-            }
-            result = executor(mock_tool_call)
-            print(f"Agent: Your name is {result}")
+        try:
+            response = call_model(text)
+            print(f"🤖 IronClaw: {response}\n")
             
-        else:
-            print("Agent: I'm listening! (Try telling me to 'remember' something).")
+            tool_result = handle_tool_call(response)
+            if tool_result:
+                print(f"🛠️ Tool Result: {tool_result}\n")
+        except Exception as e:
+            print(f"❌ Error: {e}\n")
 
 if __name__ == "__main__":
     run_agent()
