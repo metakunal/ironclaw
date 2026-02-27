@@ -44,15 +44,3 @@ Agent: Your name is Alex
 ```
 
 To stop, type `exit` or `quit`.
-
-## Git
-
-Make sure to add and commit your changes, then push:
-
-```bash
-git add .
-git commit -m "Initial commit with Gemini/Groq integration"
-git push origin main
-```
-
-`.env` and other sensitive files are ignored by `.gitignore`.
